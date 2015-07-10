@@ -2,7 +2,7 @@
   (:refer-clojure :rename {get map-get})
   (:use clojure-hbase.internal)
   (:import [org.apache.hadoop.hbase HBaseConfiguration HConstants KeyValue]
-           [org.apache.hadoop.hbase.client HTablePool Get Put Delete Scan Result RowLock HTableInterface]
+           [org.apache.hadoop.hbase.client HConnection HConnectionManager Get Put Delete Scan Result HTableInterface]
            [org.apache.hadoop.hbase.util Bytes]))
 
 (def ^{:private true} put-class
@@ -14,13 +14,13 @@
 (def ^{:private true} scan-class
   (Class/forName "org.apache.hadoop.hbase.client.Scan"))
 
-;; This holds the HTablePool reference for all users. Users never have to see
+;; This holds the HConnection reference for all users. Users never have to see
 ;; this, so we just hide this detail from the user.
 (def ^{:dynamic true :private true} *db*
   (atom nil))
 
 ;; There doesn't appear to be, as far as I can tell, a way to get the current
-;; HBaseConfiguration being used by an HTablePool. Unfortunately, this means
+;; HBaseConfiguration being used by an HConnection. Unfortunately, this means
 ;; you need to remember and keep track of this yourself, if you want to be
 ;; switching them around.
 (defn default-config
@@ -42,7 +42,7 @@
     config-obj))
 
 (defn set-config
-  "Resets the *db* atom, so that subsequent calls to htable-pool
+  "Resets the *db* atom, so that subsequent calls to hconnection
    use the new configuration (a HBaseConfiguration object).
 
    Example: (set-config
@@ -50,13 +50,15 @@
                 {\"hbase.zookeeper.dns.interface\" \"lo\"
                 :hbase.zookeeper.quorum \"127.0.0.1\"})"
   [^HBaseConfiguration config-obj]
-  (reset! *db* (HTablePool. config-obj Integer/MAX_VALUE)))
+  (reset! *db* (HConnectionManager/createConnection config-obj)))
 
-(defn- ^HTablePool htable-pool
+(defn- ^HConnection hconnection
   []
   (if-let [pool @*db*]
     pool
-    (swap! *db* (fn [curr-db] (or curr-db (HTablePool.))))))
+    (swap! *db* (fn [curr-db] (or curr-db
+                                  (HConnectionManager/createConnection
+                                   (make-config {})))))))
 
 (defmulti to-bytes-impl
   "Converts its argument into an array of bytes. By default, uses HBase's
@@ -209,23 +211,23 @@
    (.getScanner table scan)))
 
 (defn table
-  "Gets an HTable from the open HTablePool by name."
+  "Gets an HTable from the open HConnection by name."
   [table-name]
   (io!
-   (.getTable (htable-pool) (to-bytes table-name))))
+   (.getTable (hconnection) (to-bytes table-name))))
 
 (defn release-table
-  "Puts an HTable back into the open HTablePool."
+  "Puts an HTable back into the open Hconnection."
   [#^HTableInterface table]
   (io!
-   (.putTable (htable-pool) table)))
+   (.close table)))
 
 ;; with-table and with-scanner are basically the same function, but I couldn't
 ;; figure out a way to generate them both with the same macro.
 (defmacro with-table
   "Executes body, after creating the tables given in bindings. Any table
    created in this way (use the function table) will automatically be returned
-   to the HTablePool when the body finishes."
+   to the HConnection when the body finishes."
   [bindings & body]
   {:pre [(vector? bindings)
          (even? (count bindings))]}
@@ -254,18 +256,6 @@
                                (finally
                                 (.close ~(bindings 0)))))
    :else (throw (IllegalArgumentException. "Bindings must be symbols."))))
-
-(defn row-lock
-  "Returns a RowLock on the given row of the given table."
-  [#^HTableInterface table row]
-  (io!
-   (.lockRow table (to-bytes row))))
-
-(defn row-unlock
-  "Unlocks the row locked by the given RowLock."
-  [#^HTableInterface table row-lock]
-  (io!
-   (.unlockRow table row-lock)))
 
 (defprotocol HBaseOperation
   "This protocol defines an `execute` operation that can be defined on
@@ -333,16 +323,13 @@
    specs with any construction directives removed."
   [row options]
   (let [row (to-bytes row)
-        directives #{:row-lock :use-existing}
+        directives #{:use-existing}
         cons-opts (apply hash-map (flatten (filter
                                             #(contains? directives
                                                         (first %)) options)))
         get-obj (cond (contains? cons-opts :use-existing)
                       (io! (:use-existing cons-opts))
-                      (contains? cons-opts :row-lock)
-                      (new Get row (:row-lock cons-opts))
-                      :else
-                      (new Get row))]
+                      :else (new Get row))]
     [get-obj (filter #(not (contains? directives (first %))) options)]))
 
 ;; This maps each get command to its number of arguments, for helping us
@@ -357,7 +344,6 @@
    :max-versions 1    ;; :max-versions <int>
    :time-range   1    ;; :time-range [start end]
    :time-stamp   1    ;; :time-stamp time
-   :row-lock     1    ;; :row-lock <a row lock you've got>
    :use-existing 1})  ;; :use-existing <some Get you've made>
 
 (defn- apply-columns
@@ -375,8 +361,7 @@
 (defn get*
   "Returns a Get object suitable for performing a get on an HTable. To make
    modifications to an existing Get object, pass it as the argument to
-   :use-existing; to use an existing RowLock, pass it as the argument to
-   :row-lock."
+   :use-existing."
   [row & args]
   (let [specs (partition-query args get-argnums)
         [#^Get get-op specs] (make-get row specs)]
@@ -419,7 +404,6 @@
    :with-timestamp 2  ;; :with-timestamp ts [:value [:family ...] ...],
                       ;;  any number of :value or :values nested
    :write-to-WAL 1    ;; :write-to-WAL true/false
-   :row-lock     1    ;; :row-lock <a row lock you've got>
    :use-existing 1})  ;; :use-existing <a Put you've made>
 
 (defn- make-put
@@ -429,16 +413,13 @@
    non-construction options in the second."
   [row options]
   (let [row (to-bytes row)
-        directives #{:row-lock :use-existing}
+        directives #{:use-existing}
         cons-opts (apply hash-map (flatten (filter
                                             #(contains? directives
                                                         (first %)) options)))
         put-obj (cond (contains? cons-opts :use-existing)
                       (io! (:use-existing cons-opts))
-                      (contains? cons-opts :row-lock)
-                      (new Put row ^RowLock (:row-lock cons-opts))
-                      :else
-                      (new Put row))]
+                      :else (new Put row))]
     [put-obj (filter #(not (contains? directives (first %))) options)]))
 
 ;; Separate functions for -ts variants, despite code duplication, are
@@ -485,8 +466,7 @@
 (defn put*
   "Returns a Put object suitable for performing a put on an HTable. To make
    modifications to an existing Put object, pass it as the argument to
-   :use-existing; to use an existing RowLock, pass it as the argument to
-   :row-lock."
+   :use-existing."
   [row & args]
   (let [specs  (partition-query args put-argnums)
         [^Put put-op specs] (make-put row specs)]
@@ -552,7 +532,6 @@
    :with-timestamp-before 2    ;; :with-timestamp-before <long> [:column [...] ...]
    :all-versions          1    ;; :all-versions [:column [:cf :cq]
                                ;;                :columns [:cf [...]] ...]
-   :row-lock              1    ;; :row-lock <a row lock you've got>
    :use-existing          1})  ;; :use-existing <a Put you've made>
 
 (defn- make-delete
@@ -562,16 +541,12 @@
    element, and the remaining, non-construction options in the second."
   [row options]
   (let [row (to-bytes row)
-        directives #{:row-lock :use-existing}
+        directives #{:use-existing}
         cons-opts (apply hash-map (flatten (filter
                                             #(contains? directives (first %))
                                             options)))
         delete-obj (cond (contains? cons-opts :use-existing)
                          (io! (:use-existing cons-opts))
-                         (contains? cons-opts :row-lock)
-                         (new Delete row
-                              HConstants/LATEST_TIMESTAMP
-                              (:row-lock cons-opts))
                          :else (new Delete row))]
     [delete-obj (filter #(not (contains? directives (first %))) options)]))
 
@@ -639,8 +614,7 @@
 (defn delete*
   "Returns a Delete object suitable for performing a delete on an HTable. To
    make modifications to an existing Delete object, pass it as the argument to
-   :use-existing; to use an existing RowLock, pass it as the argument to
-   :row-lock."
+   :use-existing."
   [row & args]
   (let [specs     (partition-query args delete-argnums)
         [^Delete delete-op specs] (make-delete row specs)]
