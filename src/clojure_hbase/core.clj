@@ -59,6 +59,13 @@
     (swap! *db* (fn [curr-db] (or curr-db
                                   (HConnectionManager/createConnection
                                    (make-config {})))))))
+(defn new-connection
+  " Note: Flipboard app should use this method.
+  create a new hbase connection connecting to opt.
+  for remote zookeeper quorum, use {:hbase.zookeeper.quorum \"hbase01-zk.example.com,hbase02-zk.example.com,hbase03-zk.example.com\"
+  Application need to keep track of this connection and use it to call (table conn table-name)"
+  [opt]
+  (HConnectionManager/createConnection (make-config opt)))
 
 (defmulti to-bytes-impl
   "Converts its argument into an array of bytes. By default, uses HBase's
@@ -215,6 +222,13 @@
   [table-name]
   (io!
    (.getTable (hconnection) (to-bytes table-name))))
+
+(defn table-conn
+  "Get a table on given connection. Use this method when app manages the connection,
+  e.g. using component."
+  [conn table-name]
+  (io!
+    (.getTable conn (to-bytes table-name))))
 
 (defn release-table
   "Puts an HTable back into the open Hconnection."
