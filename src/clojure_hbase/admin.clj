@@ -6,7 +6,7 @@
             HTableDescriptor HColumnDescriptor]
            [org.apache.hadoop.hbase.client HBaseAdmin]
            [org.apache.hadoop.hbase.util Bytes]
-           [org.apache.hadoop.hbase.io.hfile Compression]))
+           [org.apache.hadoop.hbase.io.compress Compression]))
 
 (def ^{:tag HBaseConfiguration :dynamic true} *admin-config*
   (atom nil))
@@ -108,7 +108,7 @@
 
 (defn delete-column-family
   [table-name column-name]
-  (.deleteColumn (hbase-admin) (to-bytes table-name) (to-bytes column-name)))
+  (.deleteColumn (hbase-admin) (to-bytes table-name) column-name))
 
 (defn delete-table
   [table-name]

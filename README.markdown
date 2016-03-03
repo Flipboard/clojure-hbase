@@ -54,11 +54,11 @@ submitting them for you. Here's an example session:
       #<Result keyvalues=NONE>
 
 Creating an HTable object is potentially an expensive operation in HBase, 
-so HBase provides the class HTablePool, which keeps track of already created
+so HBase provides the class HConnection, which keeps track of already created
 HTables and lets them be reused. Clojure-HBase transparently uses an 
-HTablePool to manage tables for you. It's not strictly necessary, but 
+HConnection to manage tables for you. It's not strictly necessary, but 
 surrounding your calls with the `with-table` statement will ensure that any 
-tables requested in the bindings are returned to the HTablePool at the end of
+tables requested in the bindings are returned to the Hconnection at the end of
 the code. This can be manually managed with the `table` and `release-table`
 functions. Perhaps a better way to write the above code would have been:
 
@@ -190,7 +190,7 @@ version I've tested against, but earlier ones may still work.
 - Update to Clojure 1.2.
 - Reorganized namespaces: com.davidsantiago.clojure-hbase -> clojure-hbase.core, etc.
 - Removed dozens of reflective calls.
-- Now creates the HTablePool on first access, instead of on load.
+- Now creates the HConnection on first access, instead of on load.
 
 - Added some utility functions for converting hbase output back into usable objects.
 - Added multimethods to to-bytes so that lists, maps, and vector can be easily inserted

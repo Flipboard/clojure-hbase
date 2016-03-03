@@ -38,7 +38,9 @@
 (def test-tbl-name (str "clojure-hbase-test-db" (UUID/randomUUID)))
 (defn setup-tbl [] (create-table (table-descriptor test-tbl-name)))
 (defn remove-tbl []
-  (disable-table test-tbl-name)
+  (try
+    (disable-table test-tbl-name)
+    (catch org.apache.hadoop.hbase.TableNotEnabledException e))
   (delete-table test-tbl-name))
 
 (defmacro as-test [& body]
